@@ -1,0 +1,35 @@
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: policy-reload-on-config-update
+spec:
+  mutateExistingOnPolicyUpdate: true
+  rules:
+  - name: update-config
+    match:
+      any:
+      - resources:
+          kinds:
+          - ConfigMap
+          names:
+          - busybox-config
+          namespaces:
+          - kyverno
+    preconditions:
+      all:
+      - key: "{{ request.operation || 'BACKGROUND' }}"
+        operator: Equals
+        value: UPDATE
+    mutate:
+      targets:
+        - apiVersion: apps/v1
+          kind: Deployment
+          name: busybox
+          namespace: kyverno
+      patchStrategicMerge:
+        spec:
+          template:
+            metadata:
+              annotations:
+                example.com/triggerrestart: "{{ request.object.metadata.resourceVersion }}"

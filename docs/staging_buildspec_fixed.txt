@@ -1,0 +1,104 @@
+version: 0.2
+phases:
+  pre_build:
+    commands:
+      - |
+        yum install -y gettext
+        # Helm installation
+        curl --silent --location "https://get.helm.sh/helm-v3.9.2-linux-amd64.tar.gz" | tar xz -C /tmp
+        mv /tmp/linux-amd64/helm /usr/local/bin
+        chmod +x /usr/local/bin/helm
+        # Terraform installation
+        sudo yum install -y yum-utils
+        sudo yum-config-manager --add-repo https://rpm.releases.hashicorp.com/AmazonLinux/hashicorp.repo
+        sudo yum -y install terraform
+  build:
+    commands:
+      - |
+        set -x
+        set -e
+
+        aws configure set cli_pager ""
+
+        ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+        BUCKET_NAME=${TFSTATE_BUCKET_NAME}
+        BASE_DIR=${CODEBUILD_SRC_DIR}
+        WORKSHOP_GIT_URL=${WORKSHOP_GIT_URL:-https://github.com/aws-samples/fleet-management-on-amazon-eks-workshop}
+        WORKSHOP_GIT_BRANCH=${WORKSHOP_GIT_BRANCH:-v1.0.2}
+
+        env | sort
+
+        # clone and create CodeCommit repo
+        git clone $WORKSHOP_GIT_URL $BASE_DIR || true
+        cd $BASE_DIR
+        git checkout $WORKSHOP_GIT_BRANCH
+        cd -
+
+        # This gives access to the EKS cluster in terraform
+
+        # Spokes backend config
+        cat << EOT > $BASE_DIR/terraform/spokes/backend_override.tf
+        terraform {
+          backend "s3" {
+            bucket         = "$BUCKET_NAME"
+            key            = "spokes/terraform.tfstate"
+            region         = "$AWS_REGION"
+            workspace_key_prefix = "spokes"
+          }
+        }
+        EOT
+
+        # Fix terraform provider version conflicts
+        echo "Fixing terraform provider version conflicts..."
+        rm -f $BASE_DIR/terraform/spokes/.terraform.lock.hcl
+        rm -rf $BASE_DIR/terraform/spokes/.terraform
+        
+        # Clean up any existing terraform state to prevent dependency issues
+        rm -f $BASE_DIR/terraform/spokes/terraform.tfstate*
+        
+        # Clean up workspace state directory to prevent workspace conflicts
+        rm -rf $BASE_DIR/terraform/spokes/terraform.tfstate.d
+
+        # Force AWS provider to use compatible version (overrides all other constraints)
+        cat > $BASE_DIR/terraform/spokes/provider_override.tf << 'EOF'
+        terraform {
+          required_providers {
+            aws = {
+              source  = "hashicorp/aws"
+              version = "= 5.95.0"
+            }
+          }
+        }
+        EOF
+
+        # Fix terraform init --upgrade in scripts to prevent provider version conflicts
+        sed -i 's/ --upgrade//' $BASE_DIR/terraform/spokes/deploy.sh
+        sed -i 's/ --upgrade//' $BASE_DIR/terraform/spokes/destroy.sh
+        
+        # Fix workspace selection issue in deploy script to prevent workspace conflicts
+        sed -i 's/terraform -chdir=\\$SCRIPTDIR workspace select -or-create \\$env/terraform -chdir=\\$SCRIPTDIR workspace select \\$env 2>\\/dev\\/null || terraform -chdir=\\$SCRIPTDIR workspace new \\$env/' $BASE_DIR/terraform/spokes/deploy.sh
+
+        mkdir -p ~/.ssh
+
+        if [[ $REQUESTED_ACTION == 'Delete' ]]; then
+          # Cleanup scripts
+          cd $BASE_DIR/terraform/spokes
+          terraform init
+          # Ensure workspace exists before destroy
+          terraform workspace select ${SPOKE} 2>/dev/null || terraform workspace new ${SPOKE}
+          echo "Current terraform workspace: $(terraform workspace show)"
+          cd -
+          DEBUG=1 $BASE_DIR/terraform/spokes/destroy.sh ${SPOKE}
+        else
+          # Project Creation
+          cd $BASE_DIR/terraform/spokes
+          terraform init
+          # Ensure workspace exists and is selected before deploy
+          terraform workspace select ${SPOKE} 2>/dev/null || terraform workspace new ${SPOKE}
+          echo "Current terraform workspace: $(terraform workspace show)"
+          cd -
+          DEBUG=1 $BASE_DIR/terraform/spokes/deploy.sh ${SPOKE}
+        fi
+  post_build:
+    commands:
+      - echo ">>> build status $CODEBUILD_BUILD_SUCCEEDING "

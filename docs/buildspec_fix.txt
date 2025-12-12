@@ -1,0 +1,5 @@
+# Clean up workspace state directory to prevent workspace conflicts
+rm -rf $BASE_DIR/terraform/spokes/terraform.tfstate.d
+
+# Fix workspace selection issue in deploy script to prevent workspace conflicts  
+sed -i 's/terraform -chdir=\\$SCRIPTDIR workspace select -or-create \\$env/terraform -chdir=\\$SCRIPTDIR workspace select \\$env 2>\\/dev\\/null || terraform -chdir=\\$SCRIPTDIR workspace new \\$env\\necho "Current terraform workspace: \\$(terraform -chdir=\\$SCRIPTDIR workspace show)"/' $BASE_DIR/terraform/spokes/deploy.sh
